@@ -1,0 +1,11 @@
+dagster
+dagster-pandas
+dagster-dbt
+dagster-postgres
+dbt-postgres
+yfinance
+psycopg2-binary
+boto3
+python-dotenv
+sqlalchemy
+pandas
