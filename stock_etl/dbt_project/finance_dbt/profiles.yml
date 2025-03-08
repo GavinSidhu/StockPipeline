@@ -1,0 +1,12 @@
+finance_dbt:
+  target: dev
+  outputs:
+    dev:
+      type: postgres
+      host: "{{ env_var('DB_HOST', 'postgres') }}"
+      port: "{{ env_var('DB_PORT', '5432') }}"
+      user: "{{ env_var('DB_USERNAME', 'postgres') }}"
+      password: "{{ env_var('DB_PASSWORD', 'postgres') }}"
+      dbname: "{{ env_var('DB_DATABASE', 'stock_db') }}"
+      schema: stock
+      threads: 1

@@ -1,5 +1,5 @@
 import os
-from dagster import ConfigurableResources
+from dagster import ConfigurableResource
 
 class DatabaseConfig(ConfigurableResource):
     host: str = os.environ.get("DB_HOST", "postgres")
