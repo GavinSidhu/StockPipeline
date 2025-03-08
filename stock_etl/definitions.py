@@ -26,9 +26,7 @@ defs = Definitions(
     resources={
         "database_config": DatabaseConfig(),
         "io_manager": PostgreSQLIOManager(config=DatabaseConfig()),
-        "discord_notifier": discord_notifier.configured({
-            "webhook_url": os.environ.get('DISCORD_WEBHOOK_URL')
-        }),
+        "discord_notifier": discord_notifier, 
     },
     schedules=[weekly_schedule],
 )

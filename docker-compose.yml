@@ -24,6 +24,8 @@ services:
     volumes:
       - .:/app
       - dagster_data:/opt/dagster/dagster_home
+    env_file:
+      - .env
     environment:
       - DAGSTER_HOME=/opt/dagster/dagster_home
       - DB_HOST=postgres
@@ -31,7 +33,6 @@ services:
       - DB_USERNAME=postgres
       - DB_PASSWORD=postgres
       - DB_DATABASE=stock_db
-      - DISCORD_WEBOOK_URL=https://discordapp.com/api/webhooks/1347780195918151751/jkh3F96lY82aVbJejmSF_GC0Adeqz-OQ3ln-DUWe2kO8ntJ1KtPPMNW6wxr7Mr_8D2QG
     depends_on:
       postgres:
         condition: service_healthy

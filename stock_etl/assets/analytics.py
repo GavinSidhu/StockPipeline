@@ -1,12 +1,10 @@
 from dagster import asset, Output, MetadataValue
 import pandas as pd
-from sqlalchemy import create_engine
-import matplotlib.pyplot as plt
-import io
+from sqlalchemy import create_engine, text
 import numpy as np
 
 @asset(
-    deps=["transformed_stock_data"],  # This makes it run after the transformation
+    deps=["transformed_stock_data"],
     required_resource_keys={"database_config"}
 )
 def stock_recommendations(context):
@@ -20,117 +18,128 @@ def stock_recommendations(context):
         f"{db_config.host}:{db_config.port}/{db_config.database}"
     )
     
-    # Query the metrics table with our 37% rule analysis
-    query = """
-    SELECT 
-        ticker, 
-        date, 
-        close, 
-        recommendation,
-        min_exploration,
-        max_exploration
-    FROM stock.stock_metrics 
-    WHERE recommendation IS NOT NULL
-    ORDER BY ticker, date DESC
-    """
+    # Check if the stock_metrics table exists
+    with engine.connect() as conn:
+        result = conn.execute(text("""
+            SELECT EXISTS (
+                SELECT FROM information_schema.tables 
+                WHERE table_schema = 'stock' AND table_name = 'stock_metrics'
+            )
+        """))
+        table_exists = result.scalar()
     
-    recommendations_df = pd.read_sql(query, engine)
-    
-    # If no recommendations, create a notification that says so
-    if recommendations_df.empty:
-        context.log.info("No buy/sell recommendations found")
-        return Output(
-            pd.DataFrame({"message": ["No buy/sell recommendations at this time"]}),
-            metadata={
-                "preview": MetadataValue.md("## No Trading Signals\nNo buy/sell recommendations at this time.")
-            }
-        )
-    
-    # Get the latest data points for each ticker
-    latest_data = recommendations_df.groupby('ticker').first().reset_index()
-    
-    # Format results in a readable way
-    summary = []
-    plots = {}
-    
-    for _, row in latest_data.iterrows():
-        ticker = row['ticker']
+    if not table_exists:
+        context.log.info("stock_metrics table doesn't exist, creating it with Python")
         
-        # Formulate a recommendation with target prices
-        if 'BUY' in row['recommendation']:
-            action = f"BUY {ticker}"
-            min_price = row['min_exploration']
-            message = f"Consider buying {ticker} at the current price of ${row['close']:.2f}. "
-            message += f"This is below the exploration minimum of ${min_price:.2f}."
-            target_price = min_price * 0.95  # Set a target 5% below minimum for extra margin
-            message += f" Target buy price: ${target_price:.2f}"
-        elif 'SELL' in row['recommendation']:
-            action = f"SELL {ticker}"
-            max_price = row['max_exploration']
-            message = f"Consider selling {ticker} at the current price of ${row['close']:.2f}. "
-            message += f"This is above the exploration maximum of ${max_price:.2f}."
-            target_price = max_price * 1.05  # Set a target 5% above maximum for extra margin
-            message += f" Target sell price: ${target_price:.2f}"
-        else:
-            action = f"HOLD {ticker}"
-            message = f"Hold {ticker} at the current price of ${row['close']:.2f}."
-            target_price = None
+        # Get stock data from the database
+        stock_data_df = pd.read_sql("SELECT * FROM stock.stock_data", engine)
         
-        summary.append({
-            "ticker": ticker,
-            "action": action,
-            "current_price": row['close'],
-            "target_price": target_price,
-            "message": message
+        # Print the column names to debug
+        context.log.info(f"Columns in stock_data: {stock_data_df.columns.tolist()}")
+        
+        # Convert all column names to lowercase for consistency
+        stock_data_df.columns = [col.lower() for col in stock_data_df.columns]
+        
+        # Check if key columns exist, using case-insensitive matching
+        column_mapping = {}
+        for needed_col in ['ticker', 'date', 'open', 'close']:
+            lower_cols = [col.lower() for col in stock_data_df.columns]
+            if needed_col in lower_cols:
+                column_mapping[needed_col] = stock_data_df.columns[lower_cols.index(needed_col)]
+        
+        context.log.info(f"Column mapping: {column_mapping}")
+        
+        # Check if we have all required columns
+        if not all(col in column_mapping for col in ['ticker', 'date', 'open', 'close']):
+            missing = [col for col in ['ticker', 'date', 'open', 'close'] if col not in column_mapping]
+            context.log.error(f"Missing required columns: {missing}")
+            return Output(
+                pd.DataFrame(),
+                metadata={"error": f"Missing required columns: {missing}"}
+            )
+        
+        # Create a metrics dataframe
+        metrics_df = stock_data_df.copy()
+        
+        # Rename columns for consistency
+        metrics_df = metrics_df.rename(columns={
+            column_mapping['ticker']: 'ticker',
+            column_mapping['date']: 'date',
+            column_mapping['open']: 'open',
+            column_mapping['close']: 'close'
         })
         
-        # Get historical data for each ticker to create a plot
-        hist_query = f"""
-        SELECT date, close, min_exploration, max_exploration
-        FROM stock.stock_metrics 
-        WHERE ticker = '{ticker}'
-        ORDER BY date
-        """
-        hist_data = pd.read_sql(hist_query, engine)
+        # Calculate daily change percentage
+        metrics_df['daily_change_pct'] = ((metrics_df['close'] - metrics_df['open']) / metrics_df['open'] * 100).round(2)
         
-        # Create a plot for this ticker
-        fig, ax = plt.subplots(figsize=(10, 6))
-        ax.plot(hist_data['date'], hist_data['close'], label='Price')
+        # Calculate rolling 7-day average
+        metrics_df['rolling_7d_avg'] = metrics_df.groupby('ticker')['close'].transform(
+            lambda x: x.rolling(window=7, min_periods=1).mean()
+        )
         
-        # Add horizontal lines for min/max exploration values
-        if not pd.isna(row['min_exploration']):
-            ax.axhline(y=row['min_exploration'], color='g', linestyle='--', label='Min Exploration')
-        if not pd.isna(row['max_exploration']):
-            ax.axhline(y=row['max_exploration'], color='r', linestyle='--', label='Max Exploration')
+        # Apply 37% rule for the last 30 days of data
+        metrics_df['date'] = pd.to_datetime(metrics_df['date'])
         
-        ax.set_title(f"{ticker} Price History with 37% Rule Thresholds")
-        ax.set_xlabel('Date')
-        ax.set_ylabel('Price ($)')
-        ax.legend()
-        ax.grid(True)
+        # Get the max date to use as reference
+        max_date = metrics_df['date'].max()
         
-        # Save plot to buffer
-        buf = io.BytesIO()
-        fig.savefig(buf, format='png')
-        buf.seek(0)
+        # Add days from latest
+        metrics_df['days_from_latest'] = (max_date - metrics_df['date']).dt.days
         
-        # Add plot to metadata
-        plots[ticker] = buf.getvalue()
-    
-    # Create a summary DataFrame
-    summary_df = pd.DataFrame(summary)
-    
-    # Create rich metadata with plots and formatted recommendations
-    metadata = {
-        "summary": MetadataValue.md("## Trading Recommendations\n" + 
-                                   "\n".join([f"- {row['message']}" for row in summary])),
-    }
-    
-    # Add plots to metadata
-    for ticker, plot_data in plots.items():
-        metadata[f"{ticker}_plot"] = MetadataValue.png(plot_data)
-    
-    return Output(
-        summary_df,
-        metadata=metadata
-    )
+        # Filter to last 30 days
+        recent_df = metrics_df[metrics_df['days_from_latest'] <= 30].copy()
+        
+        # Determine phase (exploration or decision)
+        recent_df['phase'] = np.where(recent_df['days_from_latest'] > 19, 'exploration', 'decision')
+        
+        # Get min/max during exploration phase for each ticker
+        exploration_data = recent_df[recent_df['phase'] == 'exploration'].groupby('ticker').agg({
+            'close': ['min', 'max']
+        })
+        exploration_data.columns = ['min_exploration', 'max_exploration']
+        exploration_data = exploration_data.reset_index()
+        
+        # Merge back to get exploration min/max for each ticker
+        recent_df = recent_df.merge(exploration_data, on='ticker', how='left')
+        
+        # Generate buy/sell recommendations
+        conditions = [
+            (recent_df['phase'] == 'decision') & (recent_df['close'] < recent_df['min_exploration']),
+            (recent_df['phase'] == 'decision') & (recent_df['close'] > recent_df['max_exploration'])
+        ]
+        choices = [
+            'CONSIDER BUYING ' + recent_df['ticker'],
+            'CONSIDER SELLING ' + recent_df['ticker']
+        ]
+        recent_df['recommendation'] = np.select(conditions, choices, default=None)
+        
+        # Save to database
+        recent_df.to_sql('stock_metrics', engine, schema='stock', if_exists='replace', index=False)
+        
+        context.log.info(f"Created stock_metrics table with {len(recent_df)} rows")
+        
+        # Return a sample of recommendations
+        recommendations = recent_df[recent_df['recommendation'].notna()]
+        
+        return Output(
+            recommendations,
+            metadata={
+                "recommendation_count": len(recommendations),
+                "tickers_analyzed": len(recent_df['ticker'].unique()),
+                "date_range": f"{recent_df['date'].min()} to {recent_df['date'].max()}"
+            }
+        )
+    else:
+        # If table exists, just return a sample
+        recommendations = pd.read_sql(
+            "SELECT * FROM stock.stock_metrics WHERE recommendation IS NOT NULL", 
+            engine
+        )
+        
+        return Output(
+            recommendations,
+            metadata={
+                "recommendation_count": len(recommendations),
+                "data_source": "Existing stock_metrics table"
+            }
+        )

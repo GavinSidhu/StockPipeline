@@ -4,7 +4,9 @@ import pandas as pd
 from sqlalchemy import create_engine, text
 import datetime
 
-@asset
+@asset(
+    required_resource_keys={"database_config"}  # Add this line
+)
 def stock_data(context):
     """Extract stock data from YFinance."""
     logger = get_dagster_logger()

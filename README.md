@@ -35,3 +35,9 @@ An ETL pipeline to extract stock data from YFinance for VTI and VXUS, transform 
 - Add more tickers in `stock_etl/assets/extract.py`
 - Modify dbt transformation models in `stock_etl/dbt_project/finance_dbt/models/`
 - Adjust pipeline schedule in `stock_etl/definitions.py`
+
+## Configuration
+
+1. Copy `.env.example` to `.env`
+2. Update the `.env` file with your Discord webhook URL
+3. Run the Docker containers with `docker compose up`
