@@ -8,16 +8,13 @@ from stock_etl.resources.io_managers import PostgreSQLIOManager
 from stock_etl.resources.notifications import discord_notifier
 import os 
 
-# Define the job with all assets
-weekly_job = define_asset_job(
-    name="weekly_stock_etl",
-    selection=["stock_data", "transformed_stock_data", "stock_recommendations", "discord_stock_alert"]
-)
+# Define the job that runs all assets
+daily_job = define_asset_job(name="daily_stock_etl", selection="*")
 
-# Schedule the job to run weekly on Saturday at 5:00 AM
-weekly_schedule = ScheduleDefinition(
-    job=weekly_job,
-    cron_schedule="0 5 * * 6",  # Run at 5:00 AM on Saturday (6=Saturday)
+# Schedule the job to run at 9 AM Monday through Saturday
+daily_schedule = ScheduleDefinition(
+    job=daily_job,
+    cron_schedule="0 9 * * 1-6",  # Run at 9:00 AM Monday through Saturday (1-6)
 )
 
 # Create the Dagster definitions
@@ -26,7 +23,7 @@ defs = Definitions(
     resources={
         "database_config": DatabaseConfig(),
         "io_manager": PostgreSQLIOManager(config=DatabaseConfig()),
-        "discord_notifier": discord_notifier, 
+        "discord_notifier": discord_notifier,
     },
-    schedules=[weekly_schedule],
+    schedules=[daily_schedule],  # Changed from weekly_schedule to daily_schedule
 )

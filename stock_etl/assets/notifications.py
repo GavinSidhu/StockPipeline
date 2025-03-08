@@ -41,49 +41,69 @@ def discord_stock_alert(context: AssetExecutionContext):
             context.log.error(f"Failed to send Discord notification: {e}")
             return f"Failed to send Discord notification: {e}"
     
-    # If table exists, check if we have recommendations
+    # If table exists, get the data
     try:
-        # Get the latest recommendations
+        # Get all stock metrics
         query = """
-        SELECT ticker, date, close, recommendation, min_exploration, max_exploration
+        SELECT ticker, date, close, recommendation, 
+               exploration_min, exploration_max, 
+               price_vs_min, price_vs_max,
+               buy_strong, buy_medium, buy_weak,
+               sell_strong, sell_medium, sell_weak,
+               analysis_date, last_updated, notes
         FROM stock.stock_metrics
-        WHERE recommendation IS NOT NULL
-        ORDER BY ticker, date DESC
+        ORDER BY ticker
         """
         
-        recommendations = pd.read_sql(query, engine)
+        metrics = pd.read_sql(query, engine)
         
-        if recommendations.empty:
-            message = "📈 **Stock ETL Pipeline Report**\n\nThe pipeline ran successfully, but no trading recommendations were generated based on the 37% rule criteria."
+        if metrics.empty:
+            message = "📈 **Stock ETL Pipeline Report**\n\nThe pipeline ran successfully, but no metrics were generated. This might indicate a data issue."
             try:
                 context.resources.discord_notifier.send_notification(message=message)
-                context.log.info("Sent 'no recommendations' notification to Discord")
-                return "Sent 'no recommendations' notification to Discord"
+                context.log.info("Sent 'no metrics' notification to Discord")
+                return "Sent 'no metrics' notification to Discord"
             except Exception as e:
                 context.log.error(f"Failed to send Discord notification: {e}")
                 return f"Failed to send Discord notification: {e}"
-    
-        # Create a summary message
-        message = "## 📊 **Stock Trading Recommendations**\n\nBased on the 37% rule analysis:"
+        
+        # Create a summary message with date information
+        analysis_date = pd.to_datetime(metrics['analysis_date'].iloc[0]).strftime('%Y-%m-%d')
+        message = f"## 📊 **Stock Market Analysis - {analysis_date}**\n\n"
+        message += "Below is today's analysis based on the 37% optimal stopping rule.\n"
         
         # Create rich embeds for Discord - one for each ticker
         embeds = []
         
-        # Get the latest recommendation for each ticker
-        latest_recs = recommendations.groupby('ticker').first().reset_index()
-        
-        for _, row in latest_recs.iterrows():
+        for _, row in metrics.iterrows():
             ticker = row['ticker']
             
-            # Set color based on action
-            color = 0x0000FF  # Blue for HOLD
+            # Set color based on recommendation
             if "BUY" in str(row['recommendation']):
-                color = 0x00FF00  # Green for BUY
-                emoji = "🟢"
+                if "STRONG" in str(row['recommendation']):
+                    color = 0x00AA00  # Darker green for strong buy
+                    emoji = "🟢"
+                elif "MEDIUM" in str(row['recommendation']):
+                    color = 0x00CC00  # Medium green
+                    emoji = "🟢"
+                else:
+                    color = 0x00FF00  # Light green for weak buy
+                    emoji = "🟢"
             elif "SELL" in str(row['recommendation']):
-                color = 0xFF0000  # Red for SELL
-                emoji = "🔴"
+                if "STRONG" in str(row['recommendation']):
+                    color = 0xAA0000  # Darker red for strong sell
+                    emoji = "🔴"
+                elif "MEDIUM" in str(row['recommendation']):
+                    color = 0xCC0000  # Medium red
+                    emoji = "🔴"
+                else:
+                    color = 0xFF0000  # Light red for weak sell
+                    emoji = "🔴"
+            elif "WATCH" in str(row['recommendation']):
+                color = 0xFFAA00  # Orange for watch
+                emoji = "🟠"
             else:
+                color = 0x0000FF  # Blue for hold
                 emoji = "🔵"
             
             # Format the title
@@ -91,37 +111,35 @@ def discord_stock_alert(context: AssetExecutionContext):
             
             # Create a description with price details
             description = f"Current price: ${row['close']:.2f}\n"
+            description += f"Min price (8-day): ${row['exploration_min']:.2f}\n"
+            description += f"Max price (8-day): ${row['exploration_max']:.2f}\n"
+            description += f"Relative to min: {row['price_vs_min']:.2f}%\n"
+            description += f"Relative to max: {row['price_vs_max']:.2f}%\n"
             
-            if pd.notna(row['min_exploration']):
-                description += f"Minimum exploration price: ${row['min_exploration']:.2f}\n"
-            
-            if pd.notna(row['max_exploration']):
-                description += f"Maximum exploration price: ${row['max_exploration']:.2f}\n"
-            
-            # Calculate target prices
+            # Add target prices as fields
             fields = []
-            if "BUY" in str(row['recommendation']) and pd.notna(row['min_exploration']):
-                target_buy = row['min_exploration'] * 0.95  # 5% below min for extra margin
-                fields.append({
-                    "name": "Target Buy Price",
-                    "value": f"${target_buy:.2f}",
-                    "inline": True
-                })
             
-            if "SELL" in str(row['recommendation']) and pd.notna(row['max_exploration']):
-                target_sell = row['max_exploration'] * 1.05  # 5% above max for extra margin
-                fields.append({
-                    "name": "Target Sell Price",
-                    "value": f"${target_sell:.2f}",
-                    "inline": True
-                })
-            
-            # Add the date
+            # Buy thresholds
             fields.append({
-                "name": "Date",
-                "value": pd.to_datetime(row['date']).strftime('%Y-%m-%d'),
+                "name": "Buy Targets",
+                "value": f"Strong: ${row['buy_strong']:.2f}\nMedium: ${row['buy_medium']:.2f}\nWeak: ${row['buy_weak']:.2f}",
                 "inline": True
             })
+            
+            # Sell thresholds
+            fields.append({
+                "name": "Sell Targets",
+                "value": f"Strong: ${row['sell_strong']:.2f}\nMedium: ${row['sell_medium']:.2f}\nWeak: ${row['sell_weak']:.2f}",
+                "inline": True
+            })
+            
+            # Add notes
+            if pd.notna(row['notes']):
+                fields.append({
+                    "name": "Analysis Notes",
+                    "value": row['notes'],
+                    "inline": False
+                })
             
             # Create the embed
             embed = {
@@ -130,7 +148,7 @@ def discord_stock_alert(context: AssetExecutionContext):
                 "color": color,
                 "fields": fields,
                 "footer": {
-                    "text": "Based on 37% Rule Analysis"
+                    "text": f"Analysis date: {analysis_date} | 37% Rule: 8-day exploration, 14-day decision"
                 }
             }
             

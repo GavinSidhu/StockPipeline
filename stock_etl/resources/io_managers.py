@@ -9,73 +9,52 @@ class PostgreSQLIOManager(IOManager):
         
     def handle_output(self, context: OutputContext, obj):
         if isinstance(obj, pd.DataFrame) and not obj.empty:
+            # Normalize column names to lowercase to avoid case-sensitivity issues
+            obj.columns = [col.lower() for col in obj.columns]
+            
             # Get database connection
             engine = create_engine(
                 f"postgresql://{self.config.username}:{self.config.password}@"
                 f"{self.config.host}:{self.config.port}/{self.config.database}"
             )
             
-            # Normalize column names to lowercase
-            obj.columns = [col.lower() for col in obj.columns]
-            
             # Determine table name
             asset_name = context.asset_key.path[-1]
+            schema_name = "stock"
+            full_table_name = f"{schema_name}.{asset_name}"
             
             # Create schema if it doesn't exist
             with engine.connect() as conn:
-                conn.execute(text("CREATE SCHEMA IF NOT EXISTS stock"))
+                conn.execute(text(f"CREATE SCHEMA IF NOT EXISTS {schema_name}"))
                 conn.commit()
             
-            # Generate a short hash for the run ID to keep temp table name short
-            short_id = hashlib.md5(context.run_id.encode()).hexdigest()[:8]
-            temp_table_name = f"temp_{asset_name}_{short_id}"
+            # Check if the table exists
+            with engine.connect() as conn:
+                result = conn.execute(text(f"""
+                    SELECT EXISTS (
+                        SELECT FROM information_schema.tables 
+                        WHERE table_schema = '{schema_name}' AND table_name = '{asset_name}'
+                    )
+                """))
+                table_exists = result.scalar()
             
-            # Ensure the temp table name is not too long (PostgreSQL limit is 63 chars)
-            if len(temp_table_name) > 63:
-                temp_table_name = f"temp_{short_id}"
-            
-            # Write the DataFrame to the temp table
+            if table_exists:
+                # For existing tables, drop and recreate to avoid column mismatch issues
+                with engine.connect() as conn:
+                    conn.execute(text(f"DROP TABLE {full_table_name}"))
+                    conn.commit()
+                    
+            # Create a fresh table with the current DataFrame schema
             obj.to_sql(
-                temp_table_name, 
+                asset_name, 
                 engine, 
-                schema="stock",
+                schema=schema_name,
                 if_exists="replace", 
                 index=False
             )
             
-            # Now handle the main table
-            with engine.connect() as conn:
-                # Check if the main table exists
-                result = conn.execute(text(f"""
-                    SELECT EXISTS (
-                        SELECT FROM information_schema.tables 
-                        WHERE table_schema = 'stock' AND table_name = '{asset_name}'
-                    )
-                """))
-                table_exists = result.scalar()
-                
-                if not table_exists:
-                    # Create the main table from the temp table
-                    conn.execute(text(f"""
-                        CREATE TABLE stock.{asset_name} AS
-                        SELECT * FROM stock.{temp_table_name}
-                    """))
-                else:
-                    # For existing tables, simplify by truncating and reloading
-                    # This avoids complex column case matching issues
-                    conn.execute(text(f"""
-                        TRUNCATE TABLE stock.{asset_name}
-                    """))
-                    
-                    # Copy all data from temp
-                    conn.execute(text(f"""
-                        INSERT INTO stock.{asset_name}
-                        SELECT * FROM stock.{temp_table_name}
-                    """))
-                
-                # Cleanup: Drop the temp table
-                conn.execute(text(f"DROP TABLE stock.{temp_table_name}"))
-                conn.commit()
+            # Log the successful write
+            context.log.info(f"Successfully wrote {len(obj)} rows to {full_table_name}")
             
     def load_input(self, context: InputContext):
         engine = create_engine(
