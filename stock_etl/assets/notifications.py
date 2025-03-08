@@ -134,12 +134,12 @@ def discord_stock_alert(context: AssetExecutionContext):
             })
             
             # Add notes
-            if pd.notna(row['notes']):
-                fields.append({
-                    "name": "Analysis Notes",
-                    "value": row['notes'],
-                    "inline": False
-                })
+            #if pd.notna(row['notes']):
+                #fields.append({
+                    #"name": "Analysis Notes",
+                    #"value": row['notes'],
+                    #"inline": False
+                #})
             
             # Create the embed
             embed = {

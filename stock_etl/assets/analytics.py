@@ -100,13 +100,14 @@ def stock_recommendations(context):
     latest_prices = latest_prices.merge(exploration_data, on='ticker', how='left')
     
     # Calculate target prices with multiple thresholds
-    latest_prices['buy_strong'] = latest_prices['min_exploration'] * 0.95  # 5% below min
-    latest_prices['buy_medium'] = latest_prices['min_exploration'] * 0.98  # 2% below min
-    latest_prices['buy_weak'] = latest_prices['min_exploration']  # at min
     
-    latest_prices['sell_strong'] = latest_prices['max_exploration'] * 1.05  # 5% above max
-    latest_prices['sell_medium'] = latest_prices['max_exploration'] * 1.02  # 2% above max
-    latest_prices['sell_weak'] = latest_prices['max_exploration']  # at max
+    latest_prices['buy_weak'] = latest_prices['min_exploration'] * 1.01  # 1% below min
+    latest_prices['buy_medium'] = latest_prices['min_exploration']  # at min
+    latest_prices['buy_strong'] = latest_prices['min_exploration'] * 0.99  # 1% below min
+    
+    latest_prices['sell_strong'] = latest_prices['max_exploration'] * 1.01  # 2% above max
+    latest_prices['sell_medium'] = latest_prices['max_exploration']  # at max
+    latest_prices['sell_weak'] = latest_prices['max_exploration'] * 0.99 # 1% above max
     
     # Add relative positioning vs. min/max
     latest_prices['price_vs_min'] = ((latest_prices['close'] / latest_prices['min_exploration']) - 1) * 100
@@ -124,12 +125,12 @@ def stock_recommendations(context):
         (abs(latest_prices['price_vs_max']) < 1.0)   # Within 1% of max
     ]
     choices = [
-        'STRONG BUY ' + latest_prices['ticker'] + ' (>5% below exploration min)',
-        'MEDIUM BUY ' + latest_prices['ticker'] + ' (2-5% below exploration min)',
-        'WEAK BUY ' + latest_prices['ticker'] + ' (0-2% below exploration min)',
-        'STRONG SELL ' + latest_prices['ticker'] + ' (>5% above exploration max)',
-        'MEDIUM SELL ' + latest_prices['ticker'] + ' (2-5% above exploration max)',
-        'WEAK SELL ' + latest_prices['ticker'] + ' (0-2% above exploration max)',
+        'STRONG BUY ' + latest_prices['ticker'] + ' (>1% below exploration min)',
+        'MEDIUM BUY ' + latest_prices['ticker'] + ' (0-1% below exploration min)',
+        'WEAK BUY ' + latest_prices['ticker'] + ' (0-1% above exploration min)',
+        'STRONG SELL ' + latest_prices['ticker'] + ' (>1% above exploration max)',
+        'MEDIUM SELL ' + latest_prices['ticker'] + ' (0-1% above exploration max)',
+        'WEAK SELL ' + latest_prices['ticker'] + ' (0-1% below exploration max)',
         'WATCH ' + latest_prices['ticker'] + ' - APPROACHING BUY POINT',
         'WATCH ' + latest_prices['ticker'] + ' - APPROACHING SELL POINT'
     ]
