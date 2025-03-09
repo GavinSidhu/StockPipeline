@@ -5,6 +5,7 @@ import matplotlib.pyplot as plt
 import io
 import os
 import numpy as np
+from stock_etl.resources.window_size_config import WindowSizeConfig
 
 @asset(
     deps=["stock_recommendations"],
@@ -173,6 +174,257 @@ def discord_stock_alert(context: AssetExecutionContext):
             context.resources.discord_notifier.send_notification(message=error_message)
             context.log.error(f"Error in discord_stock_alert: {e}")
             return f"Error in discord_stock_alert: {e}"
+        except Exception as notify_error:
+            context.log.error(f"Failed to send error notification: {notify_error}")
+            return f"Failed to send error notification: {notify_error}"
+
+@asset(
+    deps=["window_backtest"],
+    required_resource_keys={"database_config", "discord_notifier"}
+)
+def backtest_notification(context: AssetExecutionContext):
+    """Send Discord notification with window backtest results and auto-adjust window sizes if significant improvement found."""
+    # Get database connection
+    db_config = context.resources.database_config
+    engine = create_engine(
+        f"postgresql://{db_config.username}:{db_config.password}@"
+        f"{db_config.host}:{db_config.port}/{db_config.database}"
+    )
+    
+    # Initialize window size configuration manager
+    window_config = WindowSizeConfig(db_config)
+    
+    # Check if the backtest results table exists
+    with engine.connect() as conn:
+        result = conn.execute(text("""
+            SELECT EXISTS (
+                SELECT FROM information_schema.tables 
+                WHERE table_schema = 'stock' AND table_name = 'window_backtest_results'
+            )
+        """))
+        table_exists = result.scalar()
+    
+    # If the table doesn't exist, send a notification about the issue
+    if not table_exists:
+        message = "⚠️ **Backtest Results Missing**\n\nThe backtest job ran but couldn't store results. Check the Dagster logs for details."
+        
+        try:
+            context.resources.discord_notifier.send_notification(message=message)
+            context.log.info("Sent issue notification to Discord")
+            return "Sent issue notification to Discord"
+        except Exception as e:
+            context.log.error(f"Failed to send Discord notification: {e}")
+            return f"Failed to send Discord notification: {e}"
+    
+    # If table exists, get the data
+    try:
+        # Get backtest results
+        backtest_df = pd.read_sql("""
+            SELECT * FROM stock.window_backtest_results
+            ORDER BY ticker, window_size
+        """, engine)
+        
+        if backtest_df.empty:
+            message = "📊 **Backtest Analysis**\n\nThe backtest job ran but no results were generated. This might indicate insufficient historical data."
+            try:
+                context.resources.discord_notifier.send_notification(message=message)
+                return "Sent 'no results' notification to Discord"
+            except Exception as e:
+                context.log.error(f"Failed to send Discord notification: {e}")
+                return f"Failed to send Discord notification: {e}"
+        
+        # Create summary visualizations
+        fig, axs = plt.subplots(2, 2, figsize=(15, 12))
+        
+        # Create a performance score combining accuracy and frequency
+        backtest_df['buy_performance'] = backtest_df['buy_accuracy'] * np.sqrt(backtest_df['buy_frequency'])
+        backtest_df['sell_performance'] = backtest_df['sell_accuracy'] * np.sqrt(backtest_df['sell_frequency'])
+        backtest_df['overall_performance'] = (backtest_df['buy_performance'] + backtest_df['sell_performance']) / 2
+        
+        # Fill NaN values with 0 for plotting
+        backtest_df = backtest_df.fillna(0)
+        
+        # Plot 1: Buy Signal Performance by Window Size
+        for ticker in backtest_df['ticker'].unique():
+            ticker_data = backtest_df[backtest_df['ticker'] == ticker]
+            axs[0, 0].plot(ticker_data['window_size'], ticker_data['buy_performance'], 
+                          marker='o', label=f"{ticker} Buy")
+        axs[0, 0].set_title('Buy Signal Performance Score')
+        axs[0, 0].set_xlabel('Exploration Window Size (Days)')
+        axs[0, 0].set_ylabel('Performance (Accuracy × √Frequency)')
+        axs[0, 0].grid(True, alpha=0.3)
+        axs[0, 0].legend()
+        
+        # Plot 2: Sell Signal Performance by Window Size
+        for ticker in backtest_df['ticker'].unique():
+            ticker_data = backtest_df[backtest_df['ticker'] == ticker]
+            axs[0, 1].plot(ticker_data['window_size'], ticker_data['sell_performance'], 
+                          marker='o', label=f"{ticker} Sell")
+        axs[0, 1].set_title('Sell Signal Performance Score')
+        axs[0, 1].set_xlabel('Exploration Window Size (Days)')
+        axs[0, 1].set_ylabel('Performance (Accuracy × √Frequency)')
+        axs[0, 1].grid(True, alpha=0.3)
+        axs[0, 1].legend()
+        
+        # Plot 3: Overall Performance by Window Size
+        for ticker in backtest_df['ticker'].unique():
+            ticker_data = backtest_df[backtest_df['ticker'] == ticker]
+            axs[1, 0].plot(ticker_data['window_size'], ticker_data['overall_performance'], 
+                          marker='o', label=ticker)
+        axs[1, 0].set_title('Overall Signal Performance Score')
+        axs[1, 0].set_xlabel('Exploration Window Size (Days)')
+        axs[1, 0].set_ylabel('Performance Score')
+        axs[1, 0].grid(True, alpha=0.3)
+        axs[1, 0].legend()
+        
+        # Plot 4: Table of recommended window sizes
+        axs[1, 1].axis('off')
+        
+        # Save the plot
+        buf = io.BytesIO()
+        fig.tight_layout()
+        fig.savefig(buf, format='png', dpi=120)
+        buf.seek(0)
+        plt.close(fig)
+        
+        # Auto-adjust window sizes if there's significant improvement
+        # Minimum improvement percentage required to change window size (20%)
+        min_improvement_pct = 20
+        
+        # Update window sizes and get list of changes
+        changes = window_config.update_from_backtest(backtest_df, min_improvement_pct)
+        
+        # Current configurations after updates
+        current_configs = window_config.get_all_configs()
+        
+        # Get the current timeframe used for backtest
+        current_timeframe = '6 months'  # Current backtest timeframe
+        
+        # Create a message with backtest results and changes
+        message = f"## 📊 **Weekly Window Size Backtest Results**\n\n"
+        message += f"Analysis based on the last {current_timeframe} of market data.\n\n"
+        
+        # Add information about automated changes if any
+        if changes:
+            message += f"### 🤖 **Automated Window Size Adjustments**\n\n"
+            message += "The following adjustments were made based on significant performance improvements:\n\n"
+            
+            message += "| Ticker | Previous Window | New Window | Improvement |\n"
+            message += "|--------|----------------|------------|-------------|\n"
+            
+            for change in changes:
+                message += f"| {change['ticker']} | {change['old_window']} days | {change['new_window']} days | {change['improvement_pct']:.1f}% |\n"
+            
+            message += "\n"
+        else:
+            message += "### ✓ **No Window Size Changes Needed**\n\n"
+            message += "Current window sizes are optimal or no significant improvements were found.\n\n"
+        
+        # Add table of current window sizes
+        message += "### 🔍 **Current Window Size Configuration**\n\n"
+        message += "| Ticker | Window Size | Last Updated | Reason |\n"
+        message += "|--------|-------------|--------------|--------|\n"
+        
+        for _, row in current_configs.iterrows():
+            update_time = pd.to_datetime(row['last_updated']).strftime("%Y-%m-%d")
+            message += f"| {row['ticker']} | {row['window_size']} days | {update_time} | {row['change_reason'] or 'N/A'} |\n"
+        
+        message += "\n\n### 📈 **Performance Analysis**\n"
+        message += "* **Performance Score**: Combines signal accuracy and frequency (higher is better)\n"
+        message += f"* **Auto-adjustment**: Window sizes are automatically changed when a {min_improvement_pct}%+ improvement is detected\n"
+        message += "* **Timeframe**: This analysis is based on 6 months of historical data\n\n"
+        
+        # Create embeds with detailed data
+        embeds = []
+        
+        for ticker in backtest_df['ticker'].unique():
+            ticker_data = backtest_df[backtest_df['ticker'] == ticker]
+            
+            # Format detailed data for this ticker
+            fields = []
+            
+            for window_size in sorted(ticker_data['window_size'].unique()):
+                window_row = ticker_data[ticker_data['window_size'] == window_size].iloc[0]
+                
+                # Add field for each window size
+                fields.append({
+                    "name": f"{window_size}-Day Window",
+                    "value": (f"Buy: {window_row['buy_accuracy']:.1f}% accuracy, {window_row['buy_frequency']:.1f}% frequency\n"
+                             f"Sell: {window_row['sell_accuracy']:.1f}% accuracy, {window_row['sell_frequency']:.1f}% frequency\n"
+                             f"Performance Score: {window_row['overall_performance']:.1f}"),
+                    "inline": False
+                })
+            
+            # Get current window size from configs
+            current_config = current_configs[current_configs['ticker'] == ticker]
+            current_window = current_config['window_size'].iloc[0] if not current_config.empty else 8
+            
+            # Create embed for this ticker
+            best_window = ticker_data.loc[ticker_data['overall_performance'].idxmax(), 'window_size'] \
+                if ticker_data['overall_performance'].max() > 0 else current_window
+                
+            best_score = ticker_data['overall_performance'].max()
+            
+            # Determine color based on whether a change was made
+            color = 0x00FF00 if any(c['ticker'] == ticker for c in changes) else 0x0099FF
+            
+            embed = {
+                "title": f"{ticker} - Window Size Performance Details",
+                "description": (f"Current window size: {current_window} days\n"
+                               f"Optimal window size: {best_window} days (score: {best_score:.1f})"),
+                "color": color,
+                "fields": fields,
+                "footer": {
+                    "text": f"Based on {current_timeframe} of historical data"
+                }
+            }
+            
+            embeds.append(embed)
+        
+        # Send the Discord notification
+        try:
+            # First message with main content and visualization
+            context.resources.discord_notifier.send_notification(
+                message=message,
+                embeds=[]
+            )
+            
+            # Second message with the visualization
+            context.resources.discord_notifier.send_notification(
+                message="Window Size Performance Analysis:",
+                username="Stock ETL Backtest Bot"
+            )
+            
+            # Use requests to send the image directly
+            import requests
+            webhook_url = context.resources.discord_notifier.webhook_url
+            
+            files = {
+                'file': ('backtest_results.png', buf.getvalue())
+            }
+            
+            requests.post(webhook_url, files=files)
+            
+            # Third message with detailed ticker embeds
+            context.resources.discord_notifier.send_notification(
+                message="Detailed Performance by Ticker:",
+                embeds=embeds,
+                username="Stock ETL Backtest Bot"
+            )
+            
+            context.log.info("Sent backtest results to Discord")
+            return "Sent backtest results to Discord"
+        except Exception as e:
+            context.log.error(f"Failed to send Discord notification: {e}")
+            return f"Failed to send Discord notification: {e}"
+            
+    except Exception as e:
+        # Handle any unexpected errors
+        error_message = f"⚠️ **Backtest Analysis Error**\n\nAn error occurred while generating backtest notification: {str(e)}"
+        try:
+            context.resources.discord_notifier.send_notification(message=error_message)
+            context.log.error(f"Error in backtest_notification: {e}")
+            return f"Error in backtest_notification: {e}"
         except Exception as notify_error:
             context.log.error(f"Failed to send error notification: {notify_error}")
             return f"Failed to send error notification: {notify_error}"

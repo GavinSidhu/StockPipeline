@@ -1,32 +1,26 @@
 from dagster import asset, Output, MetadataValue
 import pandas as pd
-from sqlalchemy import create_engine, text
 import numpy as np
+from sqlalchemy import create_engine, text
+from stock_etl.resources.window_size_config import WindowSizeConfig
 
 @asset(
     deps=["transformed_stock_data"],
     required_resource_keys={"database_config"}
 )
 def stock_recommendations(context):
-    """Analyze stock data using the 37% rule with the 8 most recent days as exploration for the next 14 days."""
+    """Analyze stock data using dynamic window sizes based on optimal backtest results."""
     # Get database config
     db_config = context.resources.database_config
+    
+    # Initialize window size config
+    window_config = WindowSizeConfig(db_config)
     
     # Connect to database
     engine = create_engine(
         f"postgresql://{db_config.username}:{db_config.password}@"
         f"{db_config.host}:{db_config.port}/{db_config.database}"
     )
-    
-    # Check if the stock_metrics table exists
-    with engine.connect() as conn:
-        result = conn.execute(text("""
-            SELECT EXISTS (
-                SELECT FROM information_schema.tables 
-                WHERE table_schema = 'stock' AND table_name = 'stock_metrics'
-            )
-        """))
-        table_exists = result.scalar()
     
     # Get stock data from the database
     stock_data_df = pd.read_sql("SELECT * FROM stock.stock_data", engine)
@@ -77,94 +71,114 @@ def stock_recommendations(context):
     # Calculate days from latest data point
     metrics_df['days_from_latest'] = (max_date - metrics_df['date']).dt.days
     
-    # Use the most recent 8 days as the exploration period
-    exploration_df = metrics_df[metrics_df['days_from_latest'] < 8].copy()
-    context.log.info(f"Exploration period: {exploration_df['date'].min()} to {exploration_df['date'].max()}")
-    context.log.info(f"Exploration data points: {len(exploration_df)}")
+    # Get current window configurations
+    window_configs = window_config.get_all_configs()
+    context.log.info(f"Using the following window configurations: {window_configs.to_dict('records')}")
     
-    # Get min/max during this recent exploration phase for each ticker
-    exploration_data = exploration_df.groupby('ticker').agg({
-        'close': ['min', 'max']
-    })
-    exploration_data.columns = ['min_exploration', 'max_exploration']
-    exploration_data = exploration_data.reset_index()
+    # Process each ticker with its own optimal window size
+    all_results = []
     
-    # Log min/max values for each ticker
-    for _, row in exploration_data.iterrows():
-        context.log.info(f"Ticker: {row['ticker']}, Min: {row['min_exploration']}, Max: {row['max_exploration']}")
+    for ticker in metrics_df['ticker'].unique():
+        ticker_data = metrics_df[metrics_df['ticker'] == ticker].copy()
+        
+        # Get the optimal window size for this ticker (default to 8 if not found)
+        window_size = window_config.get_window_size(ticker, default=8)
+        context.log.info(f"Using {window_size}-day exploration window for {ticker}")
+        
+        # Use the optimal window size for the exploration period
+        exploration_df = ticker_data[ticker_data['days_from_latest'] < window_size].copy()
+        
+        # Get min/max during this custom exploration phase
+        if not exploration_df.empty:
+            min_exploration = exploration_df['close'].min()
+            max_exploration = exploration_df['close'].max()
+        else:
+            context.log.warning(f"No exploration data for {ticker} with {window_size}-day window")
+            continue
+        
+        # Most recent price (today) is our reference point
+        latest_price = ticker_data[ticker_data['days_from_latest'] == 0]
+        
+        if latest_price.empty:
+            context.log.warning(f"No latest price for {ticker}")
+            continue
+            
+        latest_price = latest_price.iloc[0]
+        
+        # Calculate metrics and signals
+        result = {
+            'ticker': ticker,
+            'date': latest_price['date'],
+            'close': latest_price['close'],
+            'exploration_min': min_exploration,
+            'exploration_max': max_exploration,
+            'window_size': window_size,
+            'price_vs_min': ((latest_price['close'] / min_exploration) - 1) * 100,
+            'price_vs_max': ((latest_price['close'] / max_exploration) - 1) * 100,
+        }
+        
+        # Calculate target prices with more realistic thresholds
+        result['buy_strong'] = min_exploration * 0.995  # 0.5% below min
+        result['buy_medium'] = min_exploration  # at min
+        result['buy_weak'] = min_exploration * 1.005  # 0.5% above min
+        
+        result['sell_strong'] = max_exploration * 1.005  # 0.5% above max
+        result['sell_medium'] = max_exploration  # at max
+        result['sell_weak'] = max_exploration * 0.995  # 0.5% below max
+        
+        # Generate more nuanced forward-looking recommendations
+        if latest_price['close'] < result['buy_strong']:
+            result['recommendation'] = f'STRONG BUY {ticker} (>0.5% below exploration min)'
+        elif latest_price['close'] <= result['buy_medium']:
+            result['recommendation'] = f'MEDIUM BUY {ticker} (at exploration min)'
+        elif latest_price['close'] <= result['buy_weak']:
+            result['recommendation'] = f'WEAK BUY {ticker} (slightly above exploration min)'
+        elif latest_price['close'] > result['sell_strong']:
+            result['recommendation'] = f'STRONG SELL {ticker} (>0.5% above exploration max)'
+        elif latest_price['close'] >= result['sell_medium']:
+            result['recommendation'] = f'MEDIUM SELL {ticker} (at exploration max)'
+        elif latest_price['close'] >= result['sell_weak']:
+            result['recommendation'] = f'WEAK SELL {ticker} (slightly below exploration max)'
+        elif abs(result['price_vs_min']) < 0.5:
+            result['recommendation'] = f'WATCH {ticker} - APPROACHING BUY POINT'
+        elif abs(result['price_vs_max']) < 0.5:
+            result['recommendation'] = f'WATCH {ticker} - APPROACHING SELL POINT'
+        else:
+            result['recommendation'] = f'HOLD {ticker}'
+        
+        # Add notes explaining the strategy
+        result['notes'] = f"Analysis based on {window_size}-day exploration window. " \
+                          f"Current price relative to min: {result['price_vs_min']:.2f}%, " \
+                          f"to max: {result['price_vs_max']:.2f}%."
+        
+        all_results.append(result)
     
-    # Most recent price (today) is our reference point
-    latest_prices = metrics_df[metrics_df['days_from_latest'] == 0].copy()
-    
-    # Merge exploration stats with latest prices
-    latest_prices = latest_prices.merge(exploration_data, on='ticker', how='left')
-    
-    # Calculate target prices with multiple thresholds
-    
-    latest_prices['buy_weak'] = latest_prices['min_exploration'] * 1.01  # 1% below min
-    latest_prices['buy_medium'] = latest_prices['min_exploration']  # at min
-    latest_prices['buy_strong'] = latest_prices['min_exploration'] * 0.99  # 1% below min
-    
-    latest_prices['sell_strong'] = latest_prices['max_exploration'] * 1.01  # 2% above max
-    latest_prices['sell_medium'] = latest_prices['max_exploration']  # at max
-    latest_prices['sell_weak'] = latest_prices['max_exploration'] * 0.99 # 1% above max
-    
-    # Add relative positioning vs. min/max
-    latest_prices['price_vs_min'] = ((latest_prices['close'] / latest_prices['min_exploration']) - 1) * 100
-    latest_prices['price_vs_max'] = ((latest_prices['close'] / latest_prices['max_exploration']) - 1) * 100
-    
-    # Generate more nuanced forward-looking recommendations
-    conditions = [
-        (latest_prices['close'] < latest_prices['buy_strong']),  # Strong buy
-        (latest_prices['close'] < latest_prices['buy_medium']),  # Medium buy
-        (latest_prices['close'] < latest_prices['buy_weak']),    # Weak buy
-        (latest_prices['close'] > latest_prices['sell_strong']), # Strong sell
-        (latest_prices['close'] > latest_prices['sell_medium']), # Medium sell
-        (latest_prices['close'] > latest_prices['sell_weak']),   # Weak sell
-        (abs(latest_prices['price_vs_min']) < 1.0),  # Within 1% of min
-        (abs(latest_prices['price_vs_max']) < 1.0)   # Within 1% of max
-    ]
-    choices = [
-        'STRONG BUY ' + latest_prices['ticker'] + ' (>1% below exploration min)',
-        'MEDIUM BUY ' + latest_prices['ticker'] + ' (0-1% below exploration min)',
-        'WEAK BUY ' + latest_prices['ticker'] + ' (0-1% above exploration min)',
-        'STRONG SELL ' + latest_prices['ticker'] + ' (>1% above exploration max)',
-        'MEDIUM SELL ' + latest_prices['ticker'] + ' (0-1% above exploration max)',
-        'WEAK SELL ' + latest_prices['ticker'] + ' (0-1% below exploration max)',
-        'WATCH ' + latest_prices['ticker'] + ' - APPROACHING BUY POINT',
-        'WATCH ' + latest_prices['ticker'] + ' - APPROACHING SELL POINT'
-    ]
-    latest_prices['recommendation'] = np.select(conditions, choices, default='HOLD ' + latest_prices['ticker'])
-    
-    # Add notes explaining the strategy
-    latest_prices['notes'] = f"Analysis based on data from {exploration_df['date'].min()} to {exploration_df['date'].max()}. " \
-                           f"Current price relative to min: {latest_prices['price_vs_min'].round(2)}%, " \
-                           f"to max: {latest_prices['price_vs_max'].round(2)}%."
+    # Convert results to DataFrame
+    results_df = pd.DataFrame(all_results)
     
     # Add additional analysis context
-    latest_prices['exploration_min'] = latest_prices['min_exploration']
-    latest_prices['exploration_max'] = latest_prices['max_exploration']
-    latest_prices['current_price'] = latest_prices['close']
-    latest_prices['analysis_date'] = max_date
-    latest_prices['last_updated'] = pd.Timestamp.now()
+    results_df['analysis_date'] = max_date
+    results_df['last_updated'] = pd.Timestamp.now()
     
-    # Create a datestamped recommendation table
-    date_suffix = max_date.strftime('%Y%m%d')
-    latest_prices.to_sql(f"stock_metrics_{date_suffix}", engine, schema='stock', 
-                      if_exists='replace', index=False)
+    # Save to database
+    if not results_df.empty:
+        # Create a datestamped recommendation table
+        date_suffix = max_date.strftime('%Y%m%d')
+        results_df.to_sql(f"stock_metrics_{date_suffix}", engine, schema='stock', 
+                       if_exists='replace', index=False)
+        
+        # Update the current table
+        results_df.to_sql('stock_metrics', engine, schema='stock', if_exists='replace', index=False)
+        
+        context.log.info(f"Created stock_metrics table and stock_metrics_{date_suffix} with {len(results_df)} rows")
     
-    # Update the current table
-    latest_prices.to_sql('stock_metrics', engine, schema='stock', if_exists='replace', index=False)
-    
-    context.log.info(f"Created stock_metrics table and stock_metrics_{date_suffix} with {len(latest_prices)} rows")
-    
-    # Return all recommendations, now including HOLD
+    # Return all recommendations
     return Output(
-        latest_prices,
+        results_df,
         metadata={
-            "recommendation_count": len(latest_prices[latest_prices['recommendation'].str.contains('BUY|SELL')]),
-            "tickers_analyzed": len(latest_prices['ticker'].unique()),
-            "exploration_period": f"{exploration_df['date'].min()} to {exploration_df['date'].max()} ({len(exploration_df)} data points)",
-            "latest_prices": latest_prices[['ticker', 'close', 'price_vs_min', 'price_vs_max']].to_dict('records')
+            "recommendation_count": len(results_df[results_df['recommendation'].str.contains('BUY|SELL')]),
+            "tickers_analyzed": len(results_df['ticker'].unique()),
+            "window_sizes_used": results_df[['ticker', 'window_size']].to_dict('records'),
+            "latest_prices": results_df[['ticker', 'close', 'price_vs_min', 'price_vs_max']].to_dict('records')
         }
     )
