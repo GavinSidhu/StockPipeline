@@ -52,15 +52,15 @@ def window_backtest(context):
     # Window sizes to test (in trading days)
     window_sizes = [5, 8, 10, 15, 20]
     
-    # Create a dataframe to store backtest results
+    # Creates a dataframe to store backtest results
     results = []
     
-    # Define a timeframe for the backtest
+    # Defines a timeframe for the backtest
     end_date = stock_data_df['date'].max()
-    start_date = end_date - timedelta(days=180)  # Last 6 months
+    start_date = stock_data_df['date'].min() 
     
     # Filter data to the backtest period
-    backtest_df = stock_data_df[stock_data_df['date'] >= start_date].copy()
+    backtest_df = stock_data_df.copy()
     
     # Create plots to visualize backtest performance
     all_plots = {}

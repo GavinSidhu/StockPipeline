@@ -5,6 +5,7 @@ from stock_etl.assets.analytics import stock_recommendations
 from stock_etl.assets.notifications import discord_stock_alert, backtest_notification
 from stock_etl.assets.window_backtest import window_backtest
 from stock_etl.assets.position_sizing import position_sizing
+from stock_etl.assets.strategy_comparison import strategy_comparison
 from stock_etl.resources.db_config import DatabaseConfig
 from stock_etl.resources.io_managers import PostgreSQLIOManager
 from stock_etl.resources.notifications import discord_notifier
@@ -19,7 +20,7 @@ daily_job = define_asset_job(
 # Define a separate job for backtesting that runs weekly
 backtest_job = define_asset_job(
     name="weekly_backtest",
-    selection=["stock_data", "transformed_stock_data", "window_backtest", "backtest_notification"]
+    selection=["stock_data", "transformed_stock_data", "window_backtest", "strategy_comparison", "backtest_notification"]
 )
 
 # Schedule the daily job to run at 9 AM Monday through Saturday
@@ -31,7 +32,7 @@ daily_schedule = ScheduleDefinition(
 # Schedule the backtest job to run once a week on Sunday
 backtest_schedule = ScheduleDefinition(
     job=backtest_job,
-    cron_schedule="0 10 * * 0",  # Run at 10:00 AM on Sunday (0)
+    cron_schedule="0 10 1-7 1,4,7,10 0"
 )
 
 # Create the Dagster definitions
@@ -42,6 +43,7 @@ defs = Definitions(
         stock_recommendations, 
         position_sizing,
         window_backtest,
+        strategy_comparison,
         discord_stock_alert,
         backtest_notification
     ],

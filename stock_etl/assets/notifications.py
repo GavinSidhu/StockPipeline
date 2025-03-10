@@ -298,11 +298,34 @@ def backtest_notification(context: AssetExecutionContext):
         current_configs = window_config.get_all_configs()
         
         # Get the current timeframe used for backtest
-        current_timeframe = '6 months'  # Current backtest timeframe
+        #current_timeframe = '6 months'  # Current backtest timeframe
         
         # Create a message with backtest results and changes
         message = f"## 📊 **Weekly Window Size Backtest Results**\n\n"
-        message += f"Analysis based on the last {current_timeframe} of market data.\n\n"
+        message += f"Analysis based on the market data available since fund inception.\n\n"
+        
+        # Check if we have strategy comparison results
+        try:
+            strategy_df = pd.read_sql("SELECT * FROM stock.strategy_comparison", engine)
+            has_strategy_comparison = not strategy_df.empty
+        except:
+            has_strategy_comparison = False
+        
+        # Add strategy comparison summary if available
+        if has_strategy_comparison:
+            message += f"### 📊 **Strategy Comparison: Window vs Buy & Hold**\n\n"
+            message += "Comparing window-based strategies to regular biweekly buying:\n\n"
+            message += "| Ticker | Best Window | Window Return | Biweekly Return | Difference |\n"
+            message += "|--------|-------------|---------------|-----------------|------------|\n"
+            
+            for ticker in strategy_df['ticker'].unique():
+                ticker_data = strategy_df[strategy_df['ticker'] == ticker]
+                best_row = ticker_data.loc[ticker_data['return_pct'].idxmax()]
+                
+                message += f"| {ticker} | {best_row['window_size']} days | {best_row['return_pct']:.2f}% | "
+                message += f"{best_row['biweekly_return_pct']:.2f}% | {best_row['outperformance_pct']:+.2f}% |\n"
+            
+            message += "\n"
         
         # Add information about automated changes if any
         if changes:
@@ -404,6 +427,27 @@ def backtest_notification(context: AssetExecutionContext):
             }
             
             requests.post(webhook_url, files=files)
+            
+            # If we have strategy comparison results, add those too
+            try:
+                strategy_df = pd.read_sql("SELECT * FROM stock.strategy_comparison", engine)
+                if not strategy_df.empty:
+                    # Send a message about the strategy comparison
+                    context.resources.discord_notifier.send_notification(
+                        message="Strategy Comparison: Window vs Buy & Hold:",
+                        username="Stock ETL Backtest Bot"
+                    )
+                    
+                    # Get the strategy comparison plots and send them
+                    query = "SELECT * FROM dagster_run_asset_materializations WHERE asset_key LIKE '%strategy_comparison%' ORDER BY timestamp DESC LIMIT 1"
+                    asset_data = pd.read_sql(query, engine)
+                    
+                    if not asset_data.empty:
+                        # The strategy comparison asset should have created image data
+                        # We'd need to extract and send those images, but this is simplified
+                        context.log.info("Would send strategy comparison plots here")
+            except Exception as e:
+                context.log.warning(f"Could not send strategy comparison: {e}")
             
             # Third message with detailed ticker embeds
             context.resources.discord_notifier.send_notification(
