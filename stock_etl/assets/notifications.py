@@ -398,7 +398,7 @@ def backtest_notification(context: AssetExecutionContext):
                 "color": color,
                 "fields": fields,
                 "footer": {
-                    "text": f"Based on {current_timeframe} of historical data"
+                    "text": f"Based on historical data since fund inception"
                 }
             }
             

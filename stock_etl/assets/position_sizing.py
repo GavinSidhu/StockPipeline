@@ -120,6 +120,9 @@ def position_sizing(context):
     else:
         # No actionable signals
         recommendations_df['allocation_pct'] = 0
+        sample_amount = 1000
+        recommendations_df['example_amount'] = (recommendations_df['allocation_pct'] / 100) * sample_amount
+        recommendations_df['example_shares'] = (recommendations_df['example_amount'] / recommendations_df['close']).round(0)
         recommendations_df['allocation_amount'] = 0
         recommendations_df['shares_to_trade'] = 0
         recommendations_df['actual_investment'] = 0
