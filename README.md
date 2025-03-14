@@ -1,10 +1,13 @@
 # Stock ETL Pipeline
 
-An ETL pipeline to extract stock data from YFinance for VTI and VXUS, transform it using dbt, and analyze it using the 37% rule to identify potential buy/sell opportunities.
+An ETL pipeline to extract stock data from YFinance for VTI and VXUS, transform it using dbt. The initial implementation used the 37% rule with an exploration period of 8 days and decision period of 14 days. 
+With this I aimed to identify potential buy/sell opportunities for the above mentioned tickers, which I'm using to adhere to the Boglehead mentality. The current implementation instead tries to test varying
+window sizes to check data and base recommendations off of.
 
 ## Features
 
-- Weekly automated data extraction via YFinance
+- Daily automated data extraction via YFinance
+- Weekly recalculation of window size compared against traditional buy-and-hold strategies
 - Incremental historical data loading (fetches only new data each run)
 - dbt transformations for data cleaning and analysis
 - 37% rule implementation to identify optimal trading points
@@ -20,7 +23,7 @@ An ETL pipeline to extract stock data from YFinance for VTI and VXUS, transform 
 1. Clone this repository
 2. Run `docker-compose up`
 3. Access the Dagster UI at http://localhost:3000
-4. Trigger the "weekly_stock_etl" job manually or wait for the weekly schedule (Saturdays at 5:00 AM)
+4. Trigger the jobs manually or wait for the schedules (Daily at 9:00 AM/ Sundays at 10:00 AM)
 
 ## Project Structure
 
