@@ -1,7 +1,6 @@
 from sqlalchemy import create_engine, text
 import pandas as pd
-import os
-import json
+import datetime
 
 
 class WindowSizeConfig:
@@ -35,7 +34,7 @@ class WindowSizeConfig:
             """))
             conn.commit()
     
-    def get_window_size(self, ticker, default=8):
+    def get_window_size(self, ticker, default=30):
         """Get the exploration window size for a specific ticker."""
         with self.engine.connect() as conn:
             result = conn.execute(text("""
@@ -136,3 +135,48 @@ class WindowSizeConfig:
                 })
         
         return changes
+    
+    def update_monthly_if_needed(self):
+        """
+        Check if window sizes need to be updated based on monthly schedule.
+        Updates window sizes if they haven't been updated in the current month.
+        
+        Returns:
+            List of tickers that were updated
+        """
+        # Get current month and year
+        now = datetime.datetime.now()
+        current_month = now.month
+        current_year = now.year
+        
+        # Get all configs
+        configs = self.get_all_configs()
+        updated_tickers = []
+        
+        for _, row in configs.iterrows():
+            # Check if this config has been updated this month
+            last_updated = pd.to_datetime(row['last_updated'])
+            
+            if last_updated.month != current_month or last_updated.year != current_year:
+                # This is where we would normally trigger a backtest to find the optimal window size
+                # For now, we'll just set a random window size within our desired range
+                # In practice, you'd want to run a more sophisticated optimization here
+                
+                # Window sizes range from 14 days to 6 months (about 180 days)
+                # Let's pick from common window sizes in this range
+                window_options = [14, 30, 60, 90, 120, 180]
+                
+                # For demonstration, we'll just pick based on the month
+                # In a real implementation, this would be based on backtest results
+                index = current_month % len(window_options)
+                new_window_size = window_options[index]
+                
+                self.set_window_size(
+                    row['ticker'],
+                    new_window_size,
+                    reason=f"Monthly update for {now.strftime('%B %Y')}"
+                )
+                
+                updated_tickers.append(row['ticker'])
+        
+        return updated_tickers

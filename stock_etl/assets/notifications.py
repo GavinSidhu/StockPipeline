@@ -6,6 +6,7 @@ import io
 import os
 import numpy as np
 from stock_etl.resources.window_size_config import WindowSizeConfig
+from stock_etl.resources.threshold_config import ThresholdConfig
 
 @asset(
     deps=["stock_recommendations"],
@@ -51,6 +52,7 @@ def discord_stock_alert(context: AssetExecutionContext):
                price_vs_min, price_vs_max,
                buy_strong, buy_medium, buy_weak,
                sell_strong, sell_medium, sell_weak,
+               window_size, buy_threshold, sell_threshold,
                analysis_date, last_updated, notes
         FROM stock.stock_metrics
         ORDER BY ticker
@@ -71,7 +73,7 @@ def discord_stock_alert(context: AssetExecutionContext):
         # Create a summary message with date information
         analysis_date = pd.to_datetime(metrics['analysis_date'].iloc[0]).strftime('%Y-%m-%d')
         message = f"## 📊 **Stock Market Analysis - {analysis_date}**\n\n"
-        message += "Below is today's analysis based on the 37% optimal stopping rule.\n"
+        message += "Below is today's analysis based on dynamic window sizes and thresholds.\n"
         
         # Create rich embeds for Discord - one for each ticker
         embeds = []
@@ -112,8 +114,8 @@ def discord_stock_alert(context: AssetExecutionContext):
             
             # Create a description with price details
             description = f"Current price: ${row['close']:.2f}\n"
-            description += f"Min price (8-day): ${row['exploration_min']:.2f}\n"
-            description += f"Max price (8-day): ${row['exploration_max']:.2f}\n"
+            description += f"Min price ({row['window_size']}-day): ${row['exploration_min']:.2f}\n"
+            description += f"Max price ({row['window_size']}-day): ${row['exploration_max']:.2f}\n"
             description += f"Relative to min: {row['price_vs_min']:.2f}%\n"
             description += f"Relative to max: {row['price_vs_max']:.2f}%\n"
             
@@ -134,14 +136,6 @@ def discord_stock_alert(context: AssetExecutionContext):
                 "inline": True
             })
             
-            # Add notes
-            #if pd.notna(row['notes']):
-                #fields.append({
-                    #"name": "Analysis Notes",
-                    #"value": row['notes'],
-                    #"inline": False
-                #})
-            
             # Create the embed
             embed = {
                 "title": title,
@@ -149,7 +143,7 @@ def discord_stock_alert(context: AssetExecutionContext):
                 "color": color,
                 "fields": fields,
                 "footer": {
-                    "text": f"Analysis date: {analysis_date} | 37% Rule: 8-day exploration, 14-day decision"
+                    "text": f"Analysis date: {analysis_date} | Window: {row['window_size']}-day | Buy threshold: {row['buy_threshold']}% | Sell threshold: {row['sell_threshold']}%"
                 }
             }
             
@@ -183,7 +177,7 @@ def discord_stock_alert(context: AssetExecutionContext):
     required_resource_keys={"database_config", "discord_notifier"}
 )
 def backtest_notification(context: AssetExecutionContext):
-    """Send Discord notification with window backtest results and auto-adjust window sizes if significant improvement found."""
+    """Send Discord notification with window backtest results and auto-adjust window sizes and thresholds if significant improvement found."""
     # Get database connection
     db_config = context.resources.database_config
     engine = create_engine(
@@ -191,8 +185,9 @@ def backtest_notification(context: AssetExecutionContext):
         f"{db_config.host}:{db_config.port}/{db_config.database}"
     )
     
-    # Initialize window size configuration manager
+    # Initialize configuration managers
     window_config = WindowSizeConfig(db_config)
+    threshold_config = ThresholdConfig(db_config)
     
     # Check if the backtest results table exists
     with engine.connect() as conn:
@@ -221,7 +216,7 @@ def backtest_notification(context: AssetExecutionContext):
         # Get backtest results
         backtest_df = pd.read_sql("""
             SELECT * FROM stock.window_backtest_results
-            ORDER BY ticker, window_size
+            ORDER BY ticker, window_size, buy_threshold, sell_threshold
         """, engine)
         
         if backtest_df.empty:
@@ -244,40 +239,49 @@ def backtest_notification(context: AssetExecutionContext):
         # Fill NaN values with 0 for plotting
         backtest_df = backtest_df.fillna(0)
         
-        # Plot 1: Buy Signal Performance by Window Size
-        for ticker in backtest_df['ticker'].unique():
-            ticker_data = backtest_df[backtest_df['ticker'] == ticker]
-            axs[0, 0].plot(ticker_data['window_size'], ticker_data['buy_performance'], 
-                          marker='o', label=f"{ticker} Buy")
-        axs[0, 0].set_title('Buy Signal Performance Score')
-        axs[0, 0].set_xlabel('Exploration Window Size (Days)')
-        axs[0, 0].set_ylabel('Performance (Accuracy × √Frequency)')
+        # Plot 1: Window Size Performance
+        window_performance = backtest_df.groupby(['ticker', 'window_size'])['overall_performance'].mean().reset_index()
+        
+        for ticker in window_performance['ticker'].unique():
+            ticker_data = window_performance[window_performance['ticker'] == ticker]
+            axs[0, 0].plot(ticker_data['window_size'], ticker_data['overall_performance'], 
+                          marker='o', label=ticker)
+        
+        axs[0, 0].set_title('Window Size Performance')
+        axs[0, 0].set_xlabel('Window Size (Days)')
+        axs[0, 0].set_ylabel('Performance Score')
         axs[0, 0].grid(True, alpha=0.3)
         axs[0, 0].legend()
         
-        # Plot 2: Sell Signal Performance by Window Size
-        for ticker in backtest_df['ticker'].unique():
-            ticker_data = backtest_df[backtest_df['ticker'] == ticker]
-            axs[0, 1].plot(ticker_data['window_size'], ticker_data['sell_performance'], 
-                          marker='o', label=f"{ticker} Sell")
-        axs[0, 1].set_title('Sell Signal Performance Score')
-        axs[0, 1].set_xlabel('Exploration Window Size (Days)')
-        axs[0, 1].set_ylabel('Performance (Accuracy × √Frequency)')
+        # Plot 2: Buy Threshold Performance
+        buy_performance = backtest_df.groupby(['ticker', 'buy_threshold'])['buy_performance'].mean().reset_index()
+        
+        for ticker in buy_performance['ticker'].unique():
+            ticker_data = buy_performance[buy_performance['ticker'] == ticker]
+            axs[0, 1].plot(ticker_data['buy_threshold'], ticker_data['buy_performance'], 
+                          marker='o', label=ticker)
+        
+        axs[0, 1].set_title('Buy Threshold Performance')
+        axs[0, 1].set_xlabel('Buy Threshold (%)')
+        axs[0, 1].set_ylabel('Buy Performance Score')
         axs[0, 1].grid(True, alpha=0.3)
         axs[0, 1].legend()
         
-        # Plot 3: Overall Performance by Window Size
-        for ticker in backtest_df['ticker'].unique():
-            ticker_data = backtest_df[backtest_df['ticker'] == ticker]
-            axs[1, 0].plot(ticker_data['window_size'], ticker_data['overall_performance'], 
+        # Plot 3: Sell Threshold Performance
+        sell_performance = backtest_df.groupby(['ticker', 'sell_threshold'])['sell_performance'].mean().reset_index()
+        
+        for ticker in sell_performance['ticker'].unique():
+            ticker_data = sell_performance[sell_performance['ticker'] == ticker]
+            axs[1, 0].plot(ticker_data['sell_threshold'], ticker_data['sell_performance'], 
                           marker='o', label=ticker)
-        axs[1, 0].set_title('Overall Signal Performance Score')
-        axs[1, 0].set_xlabel('Exploration Window Size (Days)')
-        axs[1, 0].set_ylabel('Performance Score')
+        
+        axs[1, 0].set_title('Sell Threshold Performance')
+        axs[1, 0].set_xlabel('Sell Threshold (%)')
+        axs[1, 0].set_ylabel('Sell Performance Score')
         axs[1, 0].grid(True, alpha=0.3)
         axs[1, 0].legend()
         
-        # Plot 4: Table of recommended window sizes
+        # Plot 4: Table of optimal parameters
         axs[1, 1].axis('off')
         
         # Save the plot
@@ -292,17 +296,18 @@ def backtest_notification(context: AssetExecutionContext):
         min_improvement_pct = 20
         
         # Update window sizes and get list of changes
-        changes = window_config.update_from_backtest(backtest_df, min_improvement_pct)
+        window_changes = window_config.update_from_backtest(backtest_df, min_improvement_pct)
+        
+        # Update thresholds and get list of changes
+        threshold_changes = threshold_config.update_from_backtest(backtest_df, min_improvement_pct * 0.75)  # Lower threshold for changes
         
         # Current configurations after updates
-        current_configs = window_config.get_all_configs()
-        
-        # Get the current timeframe used for backtest
-        #current_timeframe = '6 months'  # Current backtest timeframe
+        window_configs = window_config.get_all_configs()
+        threshold_configs = threshold_config.get_all_configs()
         
         # Create a message with backtest results and changes
-        message = f"## 📊 **Weekly Window Size Backtest Results**\n\n"
-        message += f"Analysis based on the market data available since fund inception.\n\n"
+        message = f"## 📊 **Weekly Window and Threshold Backtest Results**\n\n"
+        message += f"Analysis based on historical data from fund inception to present.\n\n"
         
         # Check if we have strategy comparison results
         try:
@@ -327,74 +332,133 @@ def backtest_notification(context: AssetExecutionContext):
             
             message += "\n"
         
-        # Add information about automated changes if any
-        if changes:
+        # Add information about automated window size changes if any
+        if window_changes:
             message += f"### 🤖 **Automated Window Size Adjustments**\n\n"
-            message += "The following adjustments were made based on significant performance improvements:\n\n"
+            message += "The following window size adjustments were made based on significant performance improvements:\n\n"
             
             message += "| Ticker | Previous Window | New Window | Improvement |\n"
             message += "|--------|----------------|------------|-------------|\n"
             
-            for change in changes:
+            for change in window_changes:
                 message += f"| {change['ticker']} | {change['old_window']} days | {change['new_window']} days | {change['improvement_pct']:.1f}% |\n"
             
             message += "\n"
-        else:
-            message += "### ✓ **No Window Size Changes Needed**\n\n"
-            message += "Current window sizes are optimal or no significant improvements were found.\n\n"
         
-        # Add table of current window sizes
-        message += "### 🔍 **Current Window Size Configuration**\n\n"
-        message += "| Ticker | Window Size | Last Updated | Reason |\n"
-        message += "|--------|-------------|--------------|--------|\n"
+        # Add information about automated threshold changes if any
+        if threshold_changes:
+            message += f"### 🤖 **Automated Threshold Adjustments**\n\n"
+            message += "The following buy/sell threshold adjustments were made based on significant performance improvements:\n\n"
+            
+            message += "| Ticker | Previous Buy/Sell | New Buy/Sell | Improvement |\n"
+            message += "|--------|------------------|-------------|-------------|\n"
+            
+            for change in threshold_changes:
+                message += f"| {change['ticker']} | {change['old_buy_threshold']}%/{change['old_sell_threshold']}% | "
+                message += f"{change['new_buy_threshold']}%/{change['new_sell_threshold']}% | {change['improvement_pct']:.1f}% |\n"
+            
+            message += "\n"
         
-        for _, row in current_configs.iterrows():
-            update_time = pd.to_datetime(row['last_updated']).strftime("%Y-%m-%d")
-            message += f"| {row['ticker']} | {row['window_size']} days | {update_time} | {row['change_reason'] or 'N/A'} |\n"
+        if not window_changes and not threshold_changes:
+            message += "### ✓ **No Parameter Changes Needed**\n\n"
+            message += "Current window sizes and thresholds are optimal or no significant improvements were found.\n\n"
+        
+        # Add table of current window sizes and thresholds
+        message += "### 🔍 **Current Configuration**\n\n"
+        message += "| Ticker | Window Size | Buy Threshold | Sell Threshold | Last Updated | Reason |\n"
+        message += "|--------|-------------|--------------|----------------|--------------|--------|\n"
+        
+        # Join window and threshold configs
+        joined_configs = pd.merge(
+            window_configs, 
+            threshold_configs, 
+            on='ticker', 
+            suffixes=('_window', '_threshold')
+        )
+        
+        for _, row in joined_configs.iterrows():
+            update_time = pd.to_datetime(row['last_updated_window']).strftime("%Y-%m-%d")
+            message += f"| {row['ticker']} | {row['window_size']} days | {row['buy_threshold']}% | "
+            message += f"{row['sell_threshold']}% | {update_time} | {row['change_reason_window'] or 'N/A'} |\n"
         
         message += "\n\n### 📈 **Performance Analysis**\n"
         message += "* **Performance Score**: Combines signal accuracy and frequency (higher is better)\n"
-        message += f"* **Auto-adjustment**: Window sizes are automatically changed when a {min_improvement_pct}%+ improvement is detected\n"
-        message += "* **Timeframe**: This analysis is based on 6 months of historical data\n\n"
+        message += f"* **Auto-adjustment**: Parameters are automatically changed when a {min_improvement_pct}%+ improvement is detected\n"
+        message += "* **Window Range**: Testing window sizes from 14 to 180 days\n"
+        message += "* **Threshold Range**: Testing buy/sell thresholds from 2% to 10%\n\n"
         
         # Create embeds with detailed data
         embeds = []
         
+        # Best parameters for each ticker
+        best_params = []
+        
         for ticker in backtest_df['ticker'].unique():
             ticker_data = backtest_df[backtest_df['ticker'] == ticker]
             
-            # Format detailed data for this ticker
-            fields = []
-            
-            for window_size in sorted(ticker_data['window_size'].unique()):
-                window_row = ticker_data[ticker_data['window_size'] == window_size].iloc[0]
+            if ticker_data['overall_performance'].max() > 0:
+                best_row = ticker_data.loc[ticker_data['overall_performance'].idxmax()]
                 
-                # Add field for each window size
-                fields.append({
-                    "name": f"{window_size}-Day Window",
-                    "value": (f"Buy: {window_row['buy_accuracy']:.1f}% accuracy, {window_row['buy_frequency']:.1f}% frequency\n"
-                             f"Sell: {window_row['sell_accuracy']:.1f}% accuracy, {window_row['sell_frequency']:.1f}% frequency\n"
-                             f"Performance Score: {window_row['overall_performance']:.1f}"),
-                    "inline": False
+                best_params.append({
+                    'ticker': ticker,
+                    'window_size': best_row['window_size'],
+                    'buy_threshold': best_row['buy_threshold'],
+                    'sell_threshold': best_row['sell_threshold'],
+                    'overall_performance': best_row['overall_performance'],
+                    'buy_accuracy': best_row['buy_accuracy'],
+                    'sell_accuracy': best_row['sell_accuracy'],
+                    'buy_frequency': best_row['buy_frequency'],
+                    'sell_frequency': best_row['sell_frequency']
                 })
+        
+        # Create an embed for each ticker
+        for params in best_params:
+            ticker = params['ticker']
             
-            # Get current window size from configs
-            current_config = current_configs[current_configs['ticker'] == ticker]
-            current_window = current_config['window_size'].iloc[0] if not current_config.empty else 8
+            # Get current config
+            current_window = next((row['window_size'] for _, row in window_configs.iterrows() 
+                                 if row['ticker'] == ticker), None)
             
-            # Create embed for this ticker
-            best_window = ticker_data.loc[ticker_data['overall_performance'].idxmax(), 'window_size'] \
-                if ticker_data['overall_performance'].max() > 0 else current_window
-                
-            best_score = ticker_data['overall_performance'].max()
+            current_thresholds = next(({"buy": row['buy_threshold'], "sell": row['sell_threshold']} 
+                                    for _, row in threshold_configs.iterrows() 
+                                    if row['ticker'] == ticker), None)
             
             # Determine color based on whether a change was made
-            color = 0x00FF00 if any(c['ticker'] == ticker for c in changes) else 0x0099FF
+            color = 0x00FF00 if any(c['ticker'] == ticker for c in window_changes + threshold_changes) else 0x0099FF
+            
+            # Create fields for different aspects of performance
+            fields = [
+                {
+                    "name": "Optimal Parameters",
+                    "value": f"Window Size: {params['window_size']} days\n"
+                            f"Buy Threshold: {params['buy_threshold']}%\n"
+                            f"Sell Threshold: {params['sell_threshold']}%",
+                    "inline": True
+                },
+                {
+                    "name": "Current Settings",
+                    "value": f"Window Size: {current_window} days\n"
+                            f"Buy Threshold: {current_thresholds['buy']}%\n"
+                            f"Sell Threshold: {current_thresholds['sell']}%",
+                    "inline": True
+                },
+                {
+                    "name": "Signal Accuracy",
+                    "value": f"Buy: {params['buy_accuracy']:.1f}%\n"
+                            f"Sell: {params['sell_accuracy']:.1f}%",
+                    "inline": True
+                },
+                {
+                    "name": "Signal Frequency",
+                    "value": f"Buy: {params['buy_frequency']:.1f}%\n"
+                            f"Sell: {params['sell_frequency']:.1f}%",
+                    "inline": True
+                }
+            ]
             
             embed = {
-                "title": f"{ticker} - Window Size Performance Details",
-                "description": (f"Current window size: {current_window} days\n"
-                               f"Optimal window size: {best_window} days (score: {best_score:.1f})"),
+                "title": f"{ticker} - Backtest Performance Results",
+                "description": f"Overall Performance Score: {params['overall_performance']:.1f}",
                 "color": color,
                 "fields": fields,
                 "footer": {
@@ -406,7 +470,7 @@ def backtest_notification(context: AssetExecutionContext):
         
         # Send the Discord notification
         try:
-            # First message with main content and visualization
+            # First message with main content
             context.resources.discord_notifier.send_notification(
                 message=message,
                 embeds=[]
@@ -414,7 +478,7 @@ def backtest_notification(context: AssetExecutionContext):
             
             # Second message with the visualization
             context.resources.discord_notifier.send_notification(
-                message="Window Size Performance Analysis:",
+                message="Parameter Performance Analysis:",
                 username="Stock ETL Backtest Bot"
             )
             
@@ -427,27 +491,6 @@ def backtest_notification(context: AssetExecutionContext):
             }
             
             requests.post(webhook_url, files=files)
-            
-            # If we have strategy comparison results, add those too
-            try:
-                strategy_df = pd.read_sql("SELECT * FROM stock.strategy_comparison", engine)
-                if not strategy_df.empty:
-                    # Send a message about the strategy comparison
-                    context.resources.discord_notifier.send_notification(
-                        message="Strategy Comparison: Window vs Buy & Hold:",
-                        username="Stock ETL Backtest Bot"
-                    )
-                    
-                    # Get the strategy comparison plots and send them
-                    query = "SELECT * FROM dagster_run_asset_materializations WHERE asset_key LIKE '%strategy_comparison%' ORDER BY timestamp DESC LIMIT 1"
-                    asset_data = pd.read_sql(query, engine)
-                    
-                    if not asset_data.empty:
-                        # The strategy comparison asset should have created image data
-                        # We'd need to extract and send those images, but this is simplified
-                        context.log.info("Would send strategy comparison plots here")
-            except Exception as e:
-                context.log.warning(f"Could not send strategy comparison: {e}")
             
             # Third message with detailed ticker embeds
             context.resources.discord_notifier.send_notification(

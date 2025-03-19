@@ -2,19 +2,22 @@ from dagster import asset, Output, MetadataValue
 import pandas as pd
 import numpy as np
 from sqlalchemy import create_engine, text
+import datetime
 from stock_etl.resources.window_size_config import WindowSizeConfig
+from stock_etl.resources.threshold_config import ThresholdConfig
 
 @asset(
     deps=["transformed_stock_data"],
     required_resource_keys={"database_config"}
 )
 def stock_recommendations(context):
-    """Analyze stock data using dynamic window sizes based on optimal backtest results."""
+    """Analyze stock data using dynamic window sizes and thresholds based on optimal backtest results."""
     # Get database config
     db_config = context.resources.database_config
     
-    # Initialize window size config
+    # Initialize window size and threshold configs
     window_config = WindowSizeConfig(db_config)
+    threshold_config = ThresholdConfig(db_config)
     
     # Connect to database
     engine = create_engine(
@@ -71,19 +74,29 @@ def stock_recommendations(context):
     # Calculate days from latest data point
     metrics_df['days_from_latest'] = (max_date - metrics_df['date']).dt.days
     
-    # Get current window configurations
+    # Get current window and threshold configurations
     window_configs = window_config.get_all_configs()
-    context.log.info(f"Using the following window configurations: {window_configs.to_dict('records')}")
+    threshold_configs = threshold_config.get_all_configs()
     
-    # Process each ticker with its own optimal window size
+    context.log.info(f"Using the following window configurations: {window_configs.to_dict('records')}")
+    context.log.info(f"Using the following threshold configurations: {threshold_configs.to_dict('records')}")
+    
+    # Process each ticker with its own optimal window size and thresholds
     all_results = []
     
     for ticker in metrics_df['ticker'].unique():
         ticker_data = metrics_df[metrics_df['ticker'] == ticker].copy()
         
-        # Get the optimal window size for this ticker (default to 8 if not found)
-        window_size = window_config.get_window_size(ticker, default=8)
+        # Get the optimal window size for this ticker (default to 30 if not found)
+        window_size = window_config.get_window_size(ticker, default=30)
         context.log.info(f"Using {window_size}-day exploration window for {ticker}")
+        
+        # Get the optimal buy/sell thresholds for this ticker (defaults if not found)
+        thresholds = threshold_config.get_thresholds(ticker)
+        buy_threshold = thresholds['buy_threshold']
+        sell_threshold = thresholds['sell_threshold']
+        
+        context.log.info(f"Using {buy_threshold}% buy threshold and {sell_threshold}% sell threshold for {ticker}")
         
         # Use the optimal window size for the exploration period
         exploration_df = ticker_data[ticker_data['days_from_latest'] < window_size].copy()
@@ -113,41 +126,46 @@ def stock_recommendations(context):
             'exploration_min': min_exploration,
             'exploration_max': max_exploration,
             'window_size': window_size,
+            'buy_threshold': buy_threshold,
+            'sell_threshold': sell_threshold,
             'price_vs_min': ((latest_price['close'] / min_exploration) - 1) * 100,
             'price_vs_max': ((latest_price['close'] / max_exploration) - 1) * 100,
         }
         
-        # Calculate target prices with more realistic thresholds
-        result['buy_strong'] = min_exploration * 0.995  # 0.5% below min
-        result['buy_medium'] = min_exploration  # at min
-        result['buy_weak'] = min_exploration * 1.005  # 0.5% above min
+        # Calculate target prices with configurable thresholds
+        # Buy thresholds are percentages above min price
+        result['buy_strong'] = min_exploration * (1 - (buy_threshold * 0.5) / 100)  # Strong buy at 50% of threshold below min
+        result['buy_medium'] = min_exploration  # Medium buy at min
+        result['buy_weak'] = min_exploration * (1 + buy_threshold / 100)  # Weak buy at threshold% above min
         
-        result['sell_strong'] = max_exploration * 1.005  # 0.5% above max
-        result['sell_medium'] = max_exploration  # at max
-        result['sell_weak'] = max_exploration * 0.995  # 0.5% below max
+        # Sell thresholds are percentages below max price
+        result['sell_strong'] = max_exploration * (1 + (sell_threshold * 0.5) / 100)  # Strong sell at 50% of threshold above max
+        result['sell_medium'] = max_exploration  # Medium sell at max
+        result['sell_weak'] = max_exploration * (1 - sell_threshold / 100)  # Weak sell at threshold% below max
         
         # Generate more nuanced forward-looking recommendations
         if latest_price['close'] < result['buy_strong']:
-            result['recommendation'] = f'STRONG BUY {ticker} (>0.5% below exploration min)'
+            result['recommendation'] = f'STRONG BUY {ticker} (>{buy_threshold * 0.5}% below exploration min)'
         elif latest_price['close'] <= result['buy_medium']:
             result['recommendation'] = f'MEDIUM BUY {ticker} (at exploration min)'
         elif latest_price['close'] <= result['buy_weak']:
-            result['recommendation'] = f'WEAK BUY {ticker} (slightly above exploration min)'
+            result['recommendation'] = f'WEAK BUY {ticker} (within {buy_threshold}% above exploration min)'
         elif latest_price['close'] > result['sell_strong']:
-            result['recommendation'] = f'STRONG SELL {ticker} (>0.5% above exploration max)'
+            result['recommendation'] = f'STRONG SELL {ticker} (>{sell_threshold * 0.5}% above exploration max)'
         elif latest_price['close'] >= result['sell_medium']:
             result['recommendation'] = f'MEDIUM SELL {ticker} (at exploration max)'
         elif latest_price['close'] >= result['sell_weak']:
-            result['recommendation'] = f'WEAK SELL {ticker} (slightly below exploration max)'
-        elif abs(result['price_vs_min']) < 0.5:
+            result['recommendation'] = f'WEAK SELL {ticker} (within {sell_threshold}% below exploration max)'
+        elif abs(result['price_vs_min']) < buy_threshold * 0.25:
             result['recommendation'] = f'WATCH {ticker} - APPROACHING BUY POINT'
-        elif abs(result['price_vs_max']) < 0.5:
+        elif abs(result['price_vs_max']) < sell_threshold * 0.25:
             result['recommendation'] = f'WATCH {ticker} - APPROACHING SELL POINT'
         else:
             result['recommendation'] = f'HOLD {ticker}'
         
         # Add notes explaining the strategy
         result['notes'] = f"Analysis based on {window_size}-day exploration window. " \
+                          f"Buy threshold: {buy_threshold}%, Sell threshold: {sell_threshold}%. " \
                           f"Current price relative to min: {result['price_vs_min']:.2f}%, " \
                           f"to max: {result['price_vs_max']:.2f}%."
         
@@ -178,7 +196,7 @@ def stock_recommendations(context):
         metadata={
             "recommendation_count": len(results_df[results_df['recommendation'].str.contains('BUY|SELL')]),
             "tickers_analyzed": len(results_df['ticker'].unique()),
-            "window_sizes_used": results_df[['ticker', 'window_size']].to_dict('records'),
+            "window_sizes_used": results_df[['ticker', 'window_size', 'buy_threshold', 'sell_threshold']].to_dict('records'),
             "latest_prices": results_df[['ticker', 'close', 'price_vs_min', 'price_vs_max']].to_dict('records')
         }
     )
