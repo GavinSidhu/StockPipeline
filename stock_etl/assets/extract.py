@@ -12,7 +12,7 @@ def stock_data(context):
     logger = get_dagster_logger()
     
     # Define ticker symbols directly in the function instead of as a parameter
-    ticker_symbols = ["VTI", "VXUS"]
+    ticker_symbols = ["VTI", "VXUS","FBTC"]
     
     # Get database config from resources
     db_config = context.resources.database_config

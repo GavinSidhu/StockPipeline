@@ -53,8 +53,8 @@ def window_backtest(context):
     window_sizes = [14, 30, 60, 90, 120, 180]
     
     # More granular threshold percentages to test, better suited for ETFs
-    buy_thresholds = [0.5, 1.0, 1.5, 2.0, 3.0]  # From 0.5% to 3%
-    sell_thresholds = [0.5, 1.0, 1.5, 2.0, 3.0]  # From 0.5% to 3%
+    buy_thresholds = [0.1, 0.25, 0.5, 0.75, 1.0]  # From 0.1% to 1.0%
+    sell_thresholds = [0.1, 0.25, 0.5, 0.75, 1.0]  # From 0.1% to 1.0%
     
     # Creates a dataframe to store backtest results
     results = []

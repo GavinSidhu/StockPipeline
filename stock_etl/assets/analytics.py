@@ -132,33 +132,37 @@ def stock_recommendations(context):
             'price_vs_max': ((latest_price['close'] / max_exploration) - 1) * 100,
         }
         
-        # Calculate target prices with configurable thresholds
-        # Buy thresholds are percentages above min price
-        result['buy_strong'] = min_exploration * (1 - (buy_threshold * 0.5) / 100)  # Strong buy at 50% of threshold below min
-        result['buy_medium'] = min_exploration  # Medium buy at min
-        result['buy_weak'] = min_exploration * (1 + buy_threshold / 100)  # Weak buy at threshold% above min
-        
-        # Sell thresholds are percentages below max price
-        result['sell_strong'] = max_exploration * (1 + (sell_threshold * 0.5) / 100)  # Strong sell at 50% of threshold above max
-        result['sell_medium'] = max_exploration  # Medium sell at max
-        result['sell_weak'] = max_exploration * (1 - sell_threshold / 100)  # Weak sell at threshold% below max
+        # Calculate target prices with fixed percentages
+        # Buy thresholds
+# Calculate target prices with fixed percentages
+# Buy thresholds
+        result['buy_strong'] = min_exploration * 0.995  # Strong buy at 0.5% below min
+        result['buy_medium'] = min_exploration * 1 # Medium buy at 0 min
+        result['buy_weak'] = min_exploration * 1.005  # Weak buy at 0.5% above min
+
+        # Sell thresholds
+        result['sell_strong'] = max_exploration * 1.005  # Strong sell at 0.5% above max
+        result['sell_medium'] = max_exploration * 1  # Medium sell at max
+        result['sell_weak'] = max_exploration * 0.95  # Weak sell at 0.5% below max
         
         # Generate more nuanced forward-looking recommendations
+        # Generate more nuanced forward-looking recommendations
+        # Generate more nuanced forward-looking recommendations
         if latest_price['close'] < result['buy_strong']:
-            result['recommendation'] = f'STRONG BUY {ticker} (>{buy_threshold * 0.5}% below exploration min)'
+            result['recommendation'] = f'STRONG BUY {ticker} (0.5% below exploration min)'
         elif latest_price['close'] <= result['buy_medium']:
-            result['recommendation'] = f'MEDIUM BUY {ticker} (at exploration min)'
+            result['recommendation'] = f'MEDIUM BUY {ticker} (At exploration min)'
         elif latest_price['close'] <= result['buy_weak']:
-            result['recommendation'] = f'WEAK BUY {ticker} (within {buy_threshold}% above exploration min)'
+            result['recommendation'] = f'WEAK BUY {ticker} (0.5% above exploration min)'
         elif latest_price['close'] > result['sell_strong']:
-            result['recommendation'] = f'STRONG SELL {ticker} (>{sell_threshold * 0.5}% above exploration max)'
+            result['recommendation'] = f'STRONG SELL {ticker} (0.5% above exploration max)'
         elif latest_price['close'] >= result['sell_medium']:
-            result['recommendation'] = f'MEDIUM SELL {ticker} (at exploration max)'
+            result['recommendation'] = f'MEDIUM SELL {ticker} (At exploration max)'
         elif latest_price['close'] >= result['sell_weak']:
-            result['recommendation'] = f'WEAK SELL {ticker} (within {sell_threshold}% below exploration max)'
-        elif abs(result['price_vs_min']) < buy_threshold * 0.25:
+            result['recommendation'] = f'WEAK SELL {ticker} (0.5% below exploration max)'
+        elif abs(result['price_vs_min']) < 0.1:
             result['recommendation'] = f'WATCH {ticker} - APPROACHING BUY POINT'
-        elif abs(result['price_vs_max']) < sell_threshold * 0.25:
+        elif abs(result['price_vs_max']) < 0.1:
             result['recommendation'] = f'WATCH {ticker} - APPROACHING SELL POINT'
         else:
             result['recommendation'] = f'HOLD {ticker}'

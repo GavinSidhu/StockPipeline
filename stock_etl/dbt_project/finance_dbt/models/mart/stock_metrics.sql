@@ -92,13 +92,13 @@ signals AS (
     ((close / min_exploration) - 1) * 100 as price_vs_min,
     ((close / max_exploration) - 1) * 100 as price_vs_max,
     -- Calculate buy thresholds
-    min_exploration * (1 - (buy_threshold * 0.5) / 100) as buy_strong,
-    min_exploration as buy_medium,
-    min_exploration * (1 + buy_threshold / 100) as buy_weak,
+    min_exploration * 0.995 as buy_strong,
+    min_exploration * 0.9975 as buy_medium,
+    min_exploration * 1.0025 as buy_weak,
     -- Calculate sell thresholds
-    max_exploration * (1 + (sell_threshold * 0.5) / 100) as sell_strong,
-    max_exploration as sell_medium,
-    max_exploration * (1 - sell_threshold / 100) as sell_weak
+    max_exploration * 1.005 as sell_strong,
+    max_exploration * 1.0025 as sell_medium,
+    max_exploration * 0.9975 as sell_weak
   FROM window_metrics
 ),
 
@@ -138,14 +138,14 @@ recommendations AS (
     END as sell_signal,
     -- Generate consolidated recommendation
     CASE 
-      WHEN close < buy_strong THEN 'STRONG BUY ' || ticker || ' (>' || (buy_threshold * 0.5) || '% below exploration min)'
-      WHEN close <= buy_medium THEN 'MEDIUM BUY ' || ticker || ' (at exploration min)'
-      WHEN close <= buy_weak THEN 'WEAK BUY ' || ticker || ' (within ' || buy_threshold || '% above exploration min)'
-      WHEN close > sell_strong THEN 'STRONG SELL ' || ticker || ' (>' || (sell_threshold * 0.5) || '% above exploration max)'
-      WHEN close >= sell_medium THEN 'MEDIUM SELL ' || ticker || ' (at exploration max)'
-      WHEN close >= sell_weak THEN 'WEAK SELL ' || ticker || ' (within ' || sell_threshold || '% below exploration max)'
-      WHEN ABS(price_vs_min) < buy_threshold * 0.25 THEN 'WATCH ' || ticker || ' - APPROACHING BUY POINT'
-      WHEN ABS(price_vs_max) < sell_threshold * 0.25 THEN 'WATCH ' || ticker || ' - APPROACHING SELL POINT'
+      WHEN close < buy_strong THEN 'STRONG BUY ' || ticker || ' (>0.5% below exploration min)'
+      WHEN close <= buy_medium THEN 'MEDIUM BUY ' || ticker || ' (At exploration min)'
+      WHEN close <= buy_weak THEN 'WEAK BUY ' || ticker || ' (0.5% above exploration min)'
+      WHEN close > sell_strong THEN 'STRONG SELL ' || ticker || ' (>0.5% above exploration max)'
+      WHEN close >= sell_medium THEN 'MEDIUM SELL ' || ticker || ' (At exploration max)'
+      WHEN close >= sell_weak THEN 'WEAK SELL ' || ticker || ' (0.5% below exploration max)'
+      WHEN ABS(price_vs_min) < 0.1 THEN 'WATCH ' || ticker || ' - APPROACHING BUY POINT'
+      WHEN ABS(price_vs_max) < 0.1 THEN 'WATCH ' || ticker || ' - APPROACHING SELL POINT'
       ELSE 'HOLD ' || ticker
     END as recommendation
   FROM signals
